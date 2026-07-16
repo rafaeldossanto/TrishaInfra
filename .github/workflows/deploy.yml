@@ -1,0 +1,70 @@
+name: Deploy
+
+# DORMENTE: so roda com clique manual (workflow_dispatch) e falha com
+# instrucao clara enquanto os secrets da VPS nao existirem.
+#
+# Secrets necessarios (Settings > Secrets and variables > Actions):
+#   VPS_HOST     - IP ou hostname da VPS
+#   VPS_USER     - usuario SSH (ex.: deploy)
+#   VPS_SSH_KEY  - chave privada SSH (conteudo do PEM, sem passphrase)
+
+on:
+  workflow_dispatch:
+    inputs:
+      servico:
+        description: "Servico a atualizar (ou 'todos')"
+        required: true
+        default: todos
+        type: choice
+        options: [todos, cadastro, app, loc, midia, bff]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy na VPS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confere se os secrets da VPS existem
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          if [ -z "$VPS_HOST" ]; then
+            echo "::error::Secrets da VPS nao configurados. Crie VPS_HOST, VPS_USER e VPS_SSH_KEY em Settings > Secrets para ativar o deploy."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Copia compose e configs para a VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "docker-compose.prod.yml,postgres-init/*,mosquitto/mosquitto.conf,mosquitto/acl.example"
+          target: ~/trilha
+
+      - name: Pull e sobe os containers
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/trilha
+            if [ ! -f .env ]; then
+              echo "ERRO: crie o ~/trilha/.env na VPS a partir do .env.example antes do primeiro deploy."
+              exit 1
+            fi
+            SERVICO="${{ inputs.servico }}"
+            if [ "$SERVICO" = "todos" ]; then
+              docker compose -f docker-compose.prod.yml pull
+              docker compose -f docker-compose.prod.yml up -d
+            else
+              docker compose -f docker-compose.prod.yml pull "$SERVICO"
+              docker compose -f docker-compose.prod.yml up -d "$SERVICO"
+            fi
+            docker image prune -f

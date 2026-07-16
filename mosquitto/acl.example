@@ -1,0 +1,38 @@
+# Exemplo de ACL (Access Control List) para o broker Mosquitto — servico de localizacao.
+#
+# Sintaxe: https://mosquitto.org/man/mosquitto-conf-5.html
+# Copie este arquivo para /etc/mosquitto/acl e ajuste os usuarios.
+#
+# Regra geral: dispositivos moveis publicam apenas no topico do seu proprio usuario.
+# O servico loc-consumer consome todos os pontos (topico global).
+
+# ------------------------------------------------------------------
+# Usuario: loc-consumer (o servico Spring Boot que consome do broker)
+# Permissao de leitura no topico raiz de localizacao.
+# ------------------------------------------------------------------
+user loc-consumer
+topic read localizacao/#
+
+# ------------------------------------------------------------------
+# Usuario: device-<userId> (cada dispositivo movel do usuario)
+# Cada device so pode PUBLICAR no topico do seu proprio usuario.
+# Isso impede que um device injete pontos de outro usuario.
+#
+# Exemplo para o usuario com id "usuario-42":
+# ------------------------------------------------------------------
+user device-usuario-42
+topic write localizacao/ponto/usuario-42
+
+# Padrão com coringa (Mosquitto 2.x suporta %u para o username):
+# user device-%u   -- nao suportado diretamente; use um script de geracao por usuario
+#
+# Alternativa: um arquivo por usuario, gerado via script de onboarding:
+#   for user_id in $(listar_usuarios); do
+#     echo "user device-${user_id}" >> /etc/mosquitto/acl
+#     echo "topic write localizacao/ponto/${user_id}" >> /etc/mosquitto/acl
+#   done
+
+# ------------------------------------------------------------------
+# Topico de broadcast (opcional): somente leitura para todos
+# ------------------------------------------------------------------
+topic read $SYS/#

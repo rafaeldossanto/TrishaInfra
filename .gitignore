@@ -1,0 +1,5 @@
+# Segredos locais — nunca commitar
+.env
+keys/
+mosquitto/passwd
+mosquitto/acl

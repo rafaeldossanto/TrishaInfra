@@ -1,0 +1,171 @@
+# Compose de PRODUCAO do Trilha — sobe a stack completa a partir das imagens
+# publicadas no ghcr.io pelos CIs de cada servico.
+#
+# DORMENTE ate existir uma VPS: veja o README.md para o checklist de ativacao.
+# As credenciais vem do arquivo .env (copie o .env.example e preencha).
+
+name: trilha
+
+services:
+  # ------------------------------------------------------------------ infra
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Cria trilha_cadastro / trilha_app / trilha_localizacao no primeiro boot
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      # Unica porta de infra exposta: devices publicam localizacao de fora.
+      # Producao exige autenticacao (passwd + ACL — veja mosquitto/README).
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/passwd:/etc/mosquitto/passwd:ro
+      - ./mosquitto/acl:/etc/mosquitto/acl:ro
+      - mosquitto-data:/var/lib/mosquitto
+
+  # -------------------------------------------------------------- servicos
+  cadastro:
+    image: ghcr.io/rafaeldossanto/trilha-cadastro:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trilha_cadastro
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DDL_AUTO: validate
+      JWT_ISSUER: ${JWT_ISSUER}
+      JWT_RSA_PRIVATE_KEY_PATH: /keys/jwt-private.pem
+      MAIL_HOST: ${MAIL_HOST}
+      MAIL_PORT: ${MAIL_PORT}
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      MAIL_PASSWORD: ${MAIL_PASSWORD}
+      MAIL_FROM: ${MAIL_FROM}
+      EMAIL_CONFIRMACAO_URL: ${EMAIL_CONFIRMACAO_URL}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      APPLE_CLIENT_ID: ${APPLE_CLIENT_ID}
+    volumes:
+      # PEM PKCS#8 da chave RSA de assinatura dos JWTs (obrigatoria em prod:
+      # sem ela o servico aborta o boot de proposito)
+      - ./keys/jwt-private.pem:/keys/jwt-private.pem:ro
+
+  app:
+    image: ghcr.io/rafaeldossanto/trilha-app:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trilha_app
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DDL_AUTO: validate
+      JWKS_URI: http://cadastro:8080/oauth2/jwks
+
+  loc:
+    image: ghcr.io/rafaeldossanto/trilha-loc:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trilha_localizacao
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DDL_AUTO: validate
+      JWKS_URI: http://cadastro:8080/oauth2/jwks
+      REDIS_HOST: redis
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      SERVICO_APP_URL: http://app:8081
+
+  midia:
+    image: ghcr.io/rafaeldossanto/trilha-midia:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trilha_midia
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DDL_AUTO: validate
+      JWKS_URI: http://cadastro:8080/oauth2/jwks
+      # minio.url e fixo no application.yaml; o relaxed binding do Spring
+      # permite sobrescrever pela env MINIO_URL
+      MINIO_URL: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+
+  bff:
+    image: ghcr.io/rafaeldossanto/trilha-bff:latest
+    restart: unless-stopped
+    ports:
+      # Unico servico HTTP exposto — o app so fala com o BFF.
+      # Coloque um reverse proxy com TLS (Caddy/Traefik) na frente depois.
+      - "8090:8090"
+    depends_on:
+      - cadastro
+      - app
+      - loc
+      - midia
+      - redis
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      JWKS_URI: http://cadastro:8080/oauth2/jwks
+      REDIS_HOST: redis
+      SERVICO_CADASTRO_URL: http://cadastro:8080
+      SERVICO_APP_URL: http://app:8081
+      SERVICO_LOCALIZACAO_URL: http://loc:8082
+      SERVICO_MIDIA_URL: http://midia:8083
+
+volumes:
+  postgres-data:
+  minio-data:
+  mosquitto-data:
