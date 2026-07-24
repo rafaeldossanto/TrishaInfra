@@ -3,6 +3,20 @@
 #
 # DORMENTE ate existir uma VPS: veja o README.md para o checklist de ativacao.
 # As credenciais vem do arquivo .env (copie o .env.example e preencha).
+#
+# TOPOLOGIA DE REDE (defesa em profundidade):
+#   - Rede 'internal': todos os servicos e a infra. Nenhum deles publica porta
+#     no host, exceto o BFF e o broker MQTT. Postgres/Redis/MinIO e os servicos
+#     cadastro/app/loc/midia so sao alcancaveis DENTRO desta rede — o mundo
+#     externo nao chega neles direto, entao o rate limit do BFF nao e contornavel
+#     batendo na porta do servico interno.
+#   - Rede 'edge': fronteira publica. So o BFF (e, futuramente, um reverse proxy
+#     Caddy/Traefik com TLS) vive aqui. Coloque o proxy nesta rede e deixe-o
+#     enxergar APENAS o BFF; ele nao alcanca os servicos internos.
+#
+# O reverse proxy na frente do BFF e a primeira linha anti-DDoS (TLS + rate limit
+# de borda). Quando ele existir, publique as portas por ele e defina no BFF
+# SERVER_FORWARD_HEADERS_STRATEGY=framework para o rate limit chavear pelo IP real.
 
 name: trilha
 
@@ -11,6 +25,7 @@ services:
   postgres:
     image: postgres:18
     restart: unless-stopped
+    networks: [internal]
     environment:
       POSTGRES_USER: ${DB_USERNAME}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -27,6 +42,7 @@ services:
   redis:
     image: redis:8-alpine
     restart: unless-stopped
+    networks: [internal]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -36,6 +52,7 @@ services:
   minio:
     image: minio/minio:latest
     restart: unless-stopped
+    networks: [internal]
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
@@ -51,8 +68,9 @@ services:
   mosquitto:
     image: eclipse-mosquitto:2
     restart: unless-stopped
+    networks: [internal]
     ports:
-      # Unica porta de infra exposta: devices publicam localizacao de fora.
+      # Porta de infra exposta: devices publicam localizacao de fora.
       # Producao exige autenticacao (passwd + ACL — veja mosquitto/README).
       - "1883:1883"
     volumes:
@@ -62,11 +80,16 @@ services:
       - mosquitto-data:/var/lib/mosquitto
 
   # -------------------------------------------------------------- servicos
+  # cadastro/app/loc/midia NAO publicam portas: so o BFF (e os proprios
+  # servicos entre si) os alcanca, pela rede 'internal'.
   cadastro:
     image: ghcr.io/rafaeldossanto/trilha-cadastro:latest
     restart: unless-stopped
+    networks: [internal]
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
@@ -74,6 +97,8 @@ services:
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
       DDL_AUTO: validate
+      # Lockout de login por conta (contador de falhas com TTL).
+      REDIS_HOST: redis
       JWT_ISSUER: ${JWT_ISSUER}
       JWT_RSA_PRIVATE_KEY_PATH: /keys/jwt-private.pem
       MAIL_HOST: ${MAIL_HOST}
@@ -92,6 +117,7 @@ services:
   app:
     image: ghcr.io/rafaeldossanto/trilha-app:latest
     restart: unless-stopped
+    networks: [internal]
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,6 +132,7 @@ services:
   loc:
     image: ghcr.io/rafaeldossanto/trilha-loc:latest
     restart: unless-stopped
+    networks: [internal]
     depends_on:
       postgres:
         condition: service_healthy
@@ -125,6 +152,7 @@ services:
   midia:
     image: ghcr.io/rafaeldossanto/trilha-midia:latest
     restart: unless-stopped
+    networks: [internal]
     depends_on:
       postgres:
         condition: service_healthy
@@ -146,9 +174,10 @@ services:
   bff:
     image: ghcr.io/rafaeldossanto/trilha-bff:latest
     restart: unless-stopped
+    # Unico servico HTTP na fronteira: fala com os internos pela 'internal' e
+    # recebe o trafego externo pela 'edge' (direto agora; via reverse proxy depois).
+    networks: [internal, edge]
     ports:
-      # Unico servico HTTP exposto — o app so fala com o BFF.
-      # Coloque um reverse proxy com TLS (Caddy/Traefik) na frente depois.
       - "8090:8090"
     depends_on:
       - cadastro
@@ -164,6 +193,17 @@ services:
       SERVICO_APP_URL: http://app:8081
       SERVICO_LOCALIZACAO_URL: http://loc:8082
       SERVICO_MIDIA_URL: http://midia:8083
+      # Atras de um reverse proxy, defina 'framework' para o rate limit chavear
+      # pelo IP real do cliente (X-Forwarded-For) e nao pelo IP do proxy.
+      SERVER_FORWARD_HEADERS_STRATEGY: ${SERVER_FORWARD_HEADERS_STRATEGY:-none}
+
+networks:
+  # Fronteira publica: BFF + (futuro) reverse proxy. Nao alcanca os internos.
+  edge:
+    driver: bridge
+  # Malha interna: servicos + infra, sem porta publicada no host.
+  internal:
+    driver: bridge
 
 volumes:
   postgres-data:
