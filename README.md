@@ -69,6 +69,10 @@ repo `TrishaWeb` (workflow `Deploy web`). Esta stack serve so a API.
 
 ## Checklist de ativacao (quando contratar a VPS)
 
+> Antes de executar: leia o [DEPLOY.md](DEPLOY.md). Ele cobre as armadilhas que
+> travam a subida — bloqueio do Let's Encrypt por tentativa falha, se trancar
+> fora do SSH, DNS, e como sair de cada uma.
+
 1. **VPS**: qualquer Linux com **8 GB** de RAM (sao 5 JVMs + Zeebe + Postgres +
    Redis + MinIO; o Zeebe sozinho quer ~1 GB). Instalar Docker:
    `curl -fsSL https://get.docker.com | sh`
