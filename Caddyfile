@@ -46,6 +46,14 @@
 		}
 	}
 
+	# Actuator do BFF nao vai para a internet: /health e inofensivo, mas /metrics
+	# e /info expoem detalhe de infraestrutura para qualquer usuario autenticado.
+	# Para monitorar, acesse pela rede interna da VPS.
+	@actuator path /actuator /actuator/*
+	handle @actuator {
+		respond 404
+	}
+
 	# Todo o resto da API publica passa pelo BFF (que faz o rate limit por IP).
 	handle {
 		reverse_proxy bff:8090
