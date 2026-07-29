@@ -16,7 +16,7 @@ on:
         required: true
         default: todos
         type: choice
-        options: [todos, cadastro, app, loc, midia, bff, zeebe]
+        options: [todos, cadastro, app, loc, midia, bff, zeebe, caddy]
 
 permissions:
   contents: read
@@ -43,7 +43,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "docker-compose.prod.yml,postgres-init/*,mosquitto/mosquitto.conf,mosquitto/acl.example"
+          source: "docker-compose.prod.yml,Caddyfile,postgres-init/*,mosquitto/mosquitto.conf,mosquitto/acl.example"
           # mosquitto.dev.conf e docker-compose.dev.yml ficam de fora: sao locais.
           target: ~/trilha
 

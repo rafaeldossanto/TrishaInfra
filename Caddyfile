@@ -1,0 +1,53 @@
+# Reverse proxy da API do Trisha. Unica porta aberta ao mundo (80/443) e a
+# primeira linha anti-DDoS + TLS (certificado Let's Encrypt automatico).
+#
+# Por que o proxy precisa de tres rotas e nao so do BFF: por decisao de projeto,
+# o binario de midia NAO passa pelo BFF (o front sobe o arquivo direto no servico
+# de Midia) e o acompanhamento ao vivo abre o WebSocket direto no servico de
+# Localizacao. Com apenas o BFF publicado, upload de foto, capa de colecao e a
+# tela "ao vivo" ficavam inalcancaveis em producao.
+#
+# A segmentacao de rede continua valendo: quem esta exposto e o Caddy, e os
+# servicos seguem sem publicar porta no host.
+#
+# Variaveis (do .env): API_DOMAIN, ACME_EMAIL.
+{
+	# E-mail usado pelo Let's Encrypt para avisos de expiracao.
+	email {$ACME_EMAIL}
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	# Upload (POST /arquivo/upload) e leitura do binario
+	# (GET /arquivo/{id}/conteudo, publico) vao direto ao servico de Midia.
+	@midia path /arquivo /arquivo/*
+	handle @midia {
+		request_body {
+			# Folga sobre o limite do Spring (spring.servlet.multipart = 50MB),
+			# para o erro vir do servico com mensagem util, e nao do proxy.
+			max_size 60MB
+		}
+		reverse_proxy midia:8083
+	}
+
+	# STOMP/SockJS do "assistir trilha ao vivo". O Caddy faz o upgrade de
+	# WebSocket sozinho; o SockJS cai em long-polling quando precisa. O matcher
+	# inclui o path exato porque o handshake comeca em /ws-localizacao (sem
+	# barra) antes de ir para /info e /websocket.
+	@ao_vivo path /ws-localizacao /ws-localizacao/*
+	handle @ao_vivo {
+		reverse_proxy loc:8082 {
+			# Sessao ao vivo fica aberta enquanto durar a trilha.
+			transport http {
+				read_timeout 0
+				write_timeout 0
+			}
+		}
+	}
+
+	# Todo o resto da API publica passa pelo BFF (que faz o rate limit por IP).
+	handle {
+		reverse_proxy bff:8090
+	}
+}

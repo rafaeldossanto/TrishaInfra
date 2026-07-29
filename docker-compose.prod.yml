@@ -23,7 +23,11 @@ name: trilha
 services:
   # ------------------------------------------------------------------ infra
   postgres:
-    image: postgres:18
+    # PostGIS, nao o postgres puro: o servico 'loc' roda CREATE EXTENSION postgis
+    # (V1) e cria indice GiST com ST_SetSRID/ST_MakePoint (V4). Numa imagem sem a
+    # extensao o Flyway aborta e o loc nao sobe. Esta imagem e o Postgres oficial
+    # + PostGIS, com o mesmo entrypoint e o mesmo docker-entrypoint-initdb.d.
+    image: postgis/postgis:18-3.6
     restart: unless-stopped
     networks: [internal]
     environment:
@@ -31,7 +35,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      # Cria trilha_cadastro / trilha_app / trilha_localizacao no primeiro boot
+      # Cria trisha (Cadastro+APP) / trilha_localizacao / trilha_midia no 1o boot
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME}"]
@@ -115,7 +119,9 @@ services:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trilha_cadastro
+      # Banco COMPARTILHADO com o APP (ver postgres-init). O Cadastro e o dono da
+      # tabela 'usuario'; o APP so a le.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trisha
       ZEEBE_GATEWAY_ADDRESS: zeebe:26500
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
@@ -146,7 +152,9 @@ services:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trilha_app
+      # Mesmo banco do Cadastro: a entidade User do APP e uma view read-only da
+      # tabela 'usuario'. Historico proprio do Flyway (flyway_schema_history_app).
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trisha
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
       DDL_AUTO: validate
@@ -197,17 +205,20 @@ services:
       MINIO_URL: http://minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      # Base PUBLICA usada para montar a URL do binario
+      # (${MIDIA_PUBLIC_URL}/arquivo/{id}/conteudo). Precisa ser o dominio da API,
+      # que o Caddy roteia para ca — o endereco interno do MinIO nao serve, e a
+      # URL antiga (presigned) expirava em 7 dias e quebrava as fotos.
+      MIDIA_PUBLIC_URL: https://${API_DOMAIN}
       # O front web sobe arquivo direto aqui (fora do BFF) — mesma origem do CORS.
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
 
   bff:
     image: ghcr.io/rafaeldossanto/trilha-bff:latest
     restart: unless-stopped
-    # Unico servico HTTP na fronteira: fala com os internos pela 'internal' e
-    # recebe o trafego externo pela 'edge' (direto agora; via reverse proxy depois).
-    networks: [internal, edge]
-    ports:
-      - "8090:8090"
+    # Sem porta publicada: quem recebe o trafego externo e o Caddy, que faz TLS
+    # e roteia para ca. O BFF segue alcancavel so pela rede interna.
+    networks: [internal]
     depends_on:
       - cadastro
       - app
@@ -222,14 +233,39 @@ services:
       SERVICO_APP_URL: http://app:8081
       SERVICO_LOCALIZACAO_URL: http://loc:8082
       SERVICO_MIDIA_URL: http://midia:8083
-      # Atras de um reverse proxy, defina 'framework' para o rate limit chavear
-      # pelo IP real do cliente (X-Forwarded-For) e nao pelo IP do proxy.
-      SERVER_FORWARD_HEADERS_STRATEGY: ${SERVER_FORWARD_HEADERS_STRATEGY:-none}
+      # 'framework' porque o BFF esta atras do Caddy: o rate limit precisa
+      # chavear pelo IP real do cliente (X-Forwarded-For) e nao pelo IP do proxy.
+      # So voltaria a ser 'none' se o BFF fosse exposto direto (ai o cliente
+      # poderia forjar o header e escapar da trava).
+      SERVER_FORWARD_HEADERS_STRATEGY: ${SERVER_FORWARD_HEADERS_STRATEGY:-framework}
       # Origem do front web (o browser bloqueia sem isso). Ex.: https://app.seudominio.com
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
 
+  caddy:
+    # Fronteira publica: TLS automatico (Let's Encrypt) e roteamento para os tres
+    # servicos que o front precisa alcancar. Ver Caddyfile.
+    image: caddy:2-alpine
+    restart: unless-stopped
+    networks: [edge, internal]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificados emitidos: sem persistir, cada restart pede certificado novo
+      # e esbarra no rate limit do Let's Encrypt.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - bff
+      - midia
+      - loc
+
 networks:
-  # Fronteira publica: BFF + (futuro) reverse proxy. Nao alcanca os internos.
+  # Fronteira publica: so o Caddy. Nao alcanca os internos por aqui.
   edge:
     driver: bridge
   # Malha interna: servicos + infra, sem porta publicada no host.
@@ -241,3 +277,5 @@ volumes:
   minio-data:
   mosquitto-data:
   zeebe-data:
+  caddy-data:
+  caddy-config:
