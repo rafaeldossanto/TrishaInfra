@@ -10,13 +10,13 @@ de deploy via SSH, e um compose de desenvolvimento com so a infra de apoio.
 docker compose -f docker-compose.dev.yml up -d
 ```
 
-Sobe **Redis** (6379), **MinIO** (9000 + console 9001), **Mosquitto** (1883,
-anonimo) e **Zeebe** (26500). O **Postgres continua nativo** na 5432, fora
-deste compose; os servicos Spring rodam na IDE ou com `./gradlew bootRun`.
+Sobe **Redis** (6379), **MinIO** (9000 + console 9001) e **Mosquitto** (1883,
+anonimo). O **Postgres continua nativo** na 5432, fora deste compose; os
+servicos Spring rodam na IDE ou com `./gradlew bootRun`.
 
-O Zeebe e obrigatorio para o cadastro por e-mail: sem ele o `POST /usuario` do
-Cadastro falha por design (o `RegistrationService` desfaz o registro quando nao
-consegue iniciar o processo). O `dev-login` nao passa por ele.
+O cadastro por e-mail nao depende mais de broker externo: confirmacao, aceite de
+termos e prazo de expiracao sao resolvidos no proprio Postgres. O Zeebe/Camunda
+saiu em 01/08/2026 — ver `Docs/Decisoes/Remocao do Camunda.md` no cofre.
 
 **Estado atual: DORMENTE.** Nenhuma VPS contratada; o pipeline de cada
 servico ja publica imagens no ghcr.io a cada merge na master, e este repo
@@ -76,8 +76,8 @@ repo `TrishaWeb` (workflow `Deploy web`). Esta stack serve so a API.
 - Em prod `DDL_AUTO=validate`: o schema e criado **inteiramente pelo Flyway**.
   Cada servico tem uma migration de schema base (`V8` no APP, `V4` no Cadastro,
   `V3` na midia, `V4` no loc) que faz um banco vazio subir do zero.
-- O **Zeebe** roda no compose e o Cadastro aponta para ele via
-  `ZEEBE_GATEWAY_ADDRESS`. Sem Zeebe saudavel o cadastro nao funciona.
+- O prazo de confirmacao do cadastro e cobrado por um job dentro do proprio
+  Cadastro (`CADASTRO_EXPIRACAO_MINUTOS`, default 10). Nao ha broker envolvido.
 - O Mosquitto de prod **proibe anonimo**: o loc autentica com
   `MQTT_USERNAME`/`MQTT_PASSWORD`, que precisam existir no `passwd`/`acl`.
 - O front web so consegue chamar a API se `CORS_ALLOWED_ORIGINS` tiver o
@@ -93,8 +93,10 @@ repo `TrishaWeb` (workflow `Deploy web`). Esta stack serve so a API.
 > travam a subida — bloqueio do Let's Encrypt por tentativa falha, se trancar
 > fora do SSH, DNS, e como sair de cada uma.
 
-1. **VPS**: qualquer Linux com **8 GB** de RAM (sao 5 JVMs + Zeebe + Postgres +
-   Redis + MinIO; o Zeebe sozinho quer ~1 GB). Instalar Docker:
+1. **VPS**: qualquer Linux com **8 GB** de RAM e **2+ vCPUs** (sao 5 JVMs +
+   Postgres + Redis + MinIO). O piso de memoria caiu ~1,2 GB quando o Zeebe saiu
+   em 01/08/2026, mas o gargalo de 1 vCPU continua real: com um unico core a JVM
+   cai para SerialGC e o boot de cinco servicos leva muito. Instalar Docker:
    `curl -fsSL https://get.docker.com | sh`
 2. **DNS**: apontar um A/AAAA do dominio da API (ex.: `api.seudominio.com`) para
    o IP da VPS **antes** do primeiro `up` — o Let's Encrypt valida por HTTP e

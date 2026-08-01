@@ -247,7 +247,7 @@ Perder qualquer um destes dói:
 ### Ordem de subida (2 vCPUs pedem calma)
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d postgres redis minio zeebe mosquitto
+docker compose -f docker-compose.prod.yml up -d postgres redis minio mosquitto
 ```
 
 Espere estabilizar e confira:

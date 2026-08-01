@@ -22,7 +22,7 @@ on:
         required: true
         default: todos
         type: choice
-        options: [todos, cadastro, app, loc, midia, bff, zeebe, caddy]
+        options: [todos, cadastro, app, loc, midia, bff, caddy]
 
 permissions:
   contents: read
@@ -72,7 +72,6 @@ jobs:
           )
           # Imagens de terceiro: nao tem CI nosso para conferir.
           declare -A EXTERNAS=(
-            [zeebe]=camunda/zeebe:8.5.6
             [caddy]=caddy:2-alpine
           )
 

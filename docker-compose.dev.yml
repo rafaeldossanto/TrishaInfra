@@ -4,9 +4,8 @@
 #
 #   docker compose -f docker-compose.dev.yml up -d
 #
-# Sobe: Redis (cache/lockout/pubsub), MinIO (storage de midia + console web),
-# Mosquitto (telemetria GPS, anonimo) e Zeebe (processo de cadastro — sem ele
-# o POST /usuario do Cadastro falha por design).
+# Sobe: Redis (cache/lockout/pubsub), MinIO (storage de midia + console web) e
+# Mosquitto (telemetria GPS, anonimo).
 
 name: trilha-dev
 
@@ -40,17 +39,5 @@ services:
     volumes:
       - ./mosquitto/mosquitto.dev.conf:/mosquitto/config/mosquitto.conf:ro
 
-  zeebe:
-    image: camunda/zeebe:8.5.6
-    restart: unless-stopped
-    ports:
-      - "26500:26500"
-    environment:
-      ZEEBE_BROKER_DATA_DISKUSAGECOMMANDWATERMARK: "0.998"
-      ZEEBE_BROKER_DATA_DISKUSAGEREPLICATIONWATERMARK: "0.999"
-    volumes:
-      - zeebe-dev-data:/usr/local/zeebe/data
-
 volumes:
   minio-dev-data:
-  zeebe-dev-data:

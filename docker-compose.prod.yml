@@ -69,26 +69,6 @@ services:
       timeout: 5s
       retries: 5
 
-  zeebe:
-    # Orquestra o processo de cadastro (email de confirmacao + termos + timer
-    # de limpeza). Sem ele o POST /usuario do Cadastro falha por design.
-    # Versao alinhada ao spring-boot-starter-camunda:8.5.0 do Cadastro.
-    image: camunda/zeebe:8.5.6
-    restart: unless-stopped
-    networks: [internal]
-    environment:
-      # Broker standalone, sem exporter — o historico vive so no proprio Zeebe.
-      ZEEBE_BROKER_DATA_DISKUSAGECOMMANDWATERMARK: "0.998"
-      ZEEBE_BROKER_DATA_DISKUSAGEREPLICATIONWATERMARK: "0.999"
-    volumes:
-      - zeebe-data:/usr/local/zeebe/data
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:9600/ready > /dev/null 2>&1"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 45s
-
   mosquitto:
     image: eclipse-mosquitto:2
     restart: unless-stopped
@@ -115,14 +95,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      zeebe:
-        condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
       # Banco COMPARTILHADO com o APP (ver postgres-init). O Cadastro e o dono da
       # tabela 'usuario'; o APP so a le.
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trisha
-      ZEEBE_GATEWAY_ADDRESS: zeebe:26500
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
       DDL_AUTO: validate
@@ -276,6 +253,5 @@ volumes:
   postgres-data:
   minio-data:
   mosquitto-data:
-  zeebe-data:
   caddy-data:
   caddy-config:
