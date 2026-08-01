@@ -18,6 +18,21 @@
 # de borda). Quando ele existir, publique as portas por ele e defina no BFF
 # SERVER_FORWARD_HEADERS_STRATEGY=framework para o rate limit chavear pelo IP real.
 
+# TETO DE MEMORIA (mem_limit)
+#   Sem teto, cada JVM enxerga a RAM inteira da maquina e dimensiona o heap por
+#   cima disso (MaxRAMPercentage default = 25%). Com cinco servicos Java isso e
+#   overcommit garantido: em condicao normal ninguem reclama, mas num pico
+#   simultaneo o kernel escolhe uma vitima e mata (OOM killer) — em geral o
+#   Postgres, que e o processo mais gordo.
+#
+#   Com mem_limit o container ve so o que lhe cabe e o JAVA_TOOL_OPTIONS abaixo
+#   manda a JVM usar 75% desse teto como heap, deixando o resto para metaspace,
+#   code cache, threads e buffers de rede. Falta de memoria vira erro do processo
+#   certo, na hora certa, em vez de morte aleatoria.
+#
+#   Soma dos tetos: ~5,2 GB dos 8 GB da VPS. A folga e proposital — Postgres e
+#   MinIO se apoiam no page cache do SO, que vive fora dos limites.
+
 name: trilha
 
 services:
@@ -30,6 +45,8 @@ services:
     image: postgis/postgis:18-3.6
     restart: unless-stopped
     networks: [internal]
+    # Banco dos tres schemas: e o container que mais se beneficia de folga.
+    mem_limit: 1g
     environment:
       POSTGRES_USER: ${DB_USERNAME}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -47,6 +64,8 @@ services:
     image: redis:8-alpine
     restart: unless-stopped
     networks: [internal]
+    # Cache do BFF, lockout de login e Pub/Sub do tempo real — tudo com TTL curto.
+    mem_limit: 256m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -57,6 +76,7 @@ services:
     image: minio/minio:latest
     restart: unless-stopped
     networks: [internal]
+    mem_limit: 512m
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
@@ -73,6 +93,7 @@ services:
     image: eclipse-mosquitto:2
     restart: unless-stopped
     networks: [internal]
+    mem_limit: 128m
     ports:
       # Porta de infra exposta: devices publicam localizacao de fora.
       # Producao exige autenticacao (passwd + ACL — veja mosquitto/README).
@@ -90,6 +111,7 @@ services:
     image: ghcr.io/rafaeldossanto/trilha-cadastro:latest
     restart: unless-stopped
     networks: [internal]
+    mem_limit: 640m
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,6 +119,7 @@ services:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0
       # Banco COMPARTILHADO com o APP (ver postgres-init). O Cadastro e o dono da
       # tabela 'usuario'; o APP so a le.
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trisha
@@ -124,11 +147,13 @@ services:
     image: ghcr.io/rafaeldossanto/trilha-app:latest
     restart: unless-stopped
     networks: [internal]
+    mem_limit: 640m
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0
       # Mesmo banco do Cadastro: a entidade User do APP e uma view read-only da
       # tabela 'usuario'. Historico proprio do Flyway (flyway_schema_history_app).
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trisha
@@ -141,6 +166,9 @@ services:
     image: ghcr.io/rafaeldossanto/trilha-loc:latest
     restart: unless-stopped
     networks: [internal]
+    # Um pouco acima dos demais: consome MQTT continuamente e roda consulta
+    # geoespacial (PostGIS) na descoberta por bbox.
+    mem_limit: 704m
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,6 +176,7 @@ services:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trilha_localizacao
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
@@ -165,6 +194,10 @@ services:
     image: ghcr.io/rafaeldossanto/trilha-midia:latest
     restart: unless-stopped
     networks: [internal]
+    # O maior teto entre os servicos: recebe multipart de ate 50 MB e o buffer do
+    # upload passa pelo heap antes de ir para o MinIO. Apertar aqui derruba envio
+    # de foto sob concorrencia.
+    mem_limit: 896m
     depends_on:
       postgres:
         condition: service_healthy
@@ -172,6 +205,7 @@ services:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trilha_midia
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
@@ -196,6 +230,7 @@ services:
     # Sem porta publicada: quem recebe o trafego externo e o Caddy, que faz TLS
     # e roteia para ca. O BFF segue alcancavel so pela rede interna.
     networks: [internal]
+    mem_limit: 640m
     depends_on:
       - cadastro
       - app
@@ -204,6 +239,7 @@ services:
       - redis
     environment:
       SPRING_PROFILES_ACTIVE: prod
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0
       JWKS_URI: http://cadastro:8080/oauth2/jwks
       REDIS_HOST: redis
       SERVICO_CADASTRO_URL: http://cadastro:8080
@@ -224,6 +260,7 @@ services:
     image: caddy:2-alpine
     restart: unless-stopped
     networks: [edge, internal]
+    mem_limit: 128m
     ports:
       - "80:80"
       - "443:443"

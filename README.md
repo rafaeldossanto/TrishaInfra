@@ -78,6 +78,12 @@ repo `TrishaWeb` (workflow `Deploy web`). Esta stack serve so a API.
   `V3` na midia, `V4` no loc) que faz um banco vazio subir do zero.
 - O prazo de confirmacao do cadastro e cobrado por um job dentro do proprio
   Cadastro (`CADASTRO_EXPIRACAO_MINUTOS`, default 10). Nao ha broker envolvido.
+- Todo container tem `mem_limit` e as cinco JVMs recebem
+  `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75.0`. Sem isso cada JVM enxergaria a
+  RAM inteira da maquina e dimensionaria o heap por cima dela — com cinco
+  servicos Java, overcommit garantido e o OOM killer escolhendo a vitima (em
+  geral o Postgres). Os tetos somam ~5,4 GB dos 8 GB; a folga e para o page
+  cache do Postgres e do MinIO, que vive fora dos limites do container.
 - O Mosquitto de prod **proibe anonimo**: o loc autentica com
   `MQTT_USERNAME`/`MQTT_PASSWORD`, que precisam existir no `passwd`/`acl`.
 - O front web so consegue chamar a API se `CORS_ALLOWED_ORIGINS` tiver o
