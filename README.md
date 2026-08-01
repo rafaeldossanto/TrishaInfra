@@ -27,8 +27,28 @@ deixa o deploy pronto para quando existir servidor.
 ```
 push na master (cada repo) ──> CI: testes ──> imagem ghcr.io/rafaeldossanto/trilha-<svc>:latest
                                                         │
-deploy.yml (clique manual) ──> SSH na VPS ──> docker compose pull + up -d ◄┘
+deploy.yml (clique manual) ──> guard de CI ──> SSH na VPS ──> compose pull + up -d ◄┘
+                                    │
+                                    └─ CI vermelho/incompleto: bloqueia, nada sai daqui
 ```
+
+O **guard de CI** existe porque o deploy mentia. Quando o CI de um servico
+quebra, o job que publica a imagem nao roda e a tag `:latest` continua apontando
+para o commit anterior — o `compose pull` re-subia a versao velha e o workflow
+terminava **verde**, como se a correcao tivesse ido para producao. Antes de
+tocar no servidor, o deploy agora confere na API do GitHub o ultimo run de
+`push` do `ci.yml` na master de cada servico alvo e bloqueia se ele quebrou,
+ainda esta rodando, ou nem existe para o commit atual. Na duvida (API fora, rate
+limit) ele **bloqueia**: falha fechada.
+
+Ao final, o Step Summary do run lista qual commit de cada servico subiu — e como
+o compose so diz `:latest`, esse resumo e hoje o unico registro de qual versao
+esta em producao.
+
+> O mapa servico -> repo vive no proprio `deploy.yml`. O BFF e o repo
+> **`TrishaBff`**; existe um `rafaeldossanto/BFF` de outro projeto, e o GitHub
+> resolve nome de repo sem diferenciar maiuscula — um mapa desatualizado
+> validaria o CI do projeto errado e liberaria deploy quebrado.
 
 O front web nao vive aqui: ele e publicado no **Firebase Hosting** a partir do
 repo `TrishaWeb` (workflow `Deploy web`). Esta stack serve so a API.

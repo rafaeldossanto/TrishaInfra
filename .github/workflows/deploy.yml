@@ -7,6 +7,12 @@ name: Deploy
 #   VPS_HOST     - IP ou hostname da VPS
 #   VPS_USER     - usuario SSH (ex.: deploy)
 #   VPS_SSH_KEY  - chave privada SSH (conteudo do PEM, sem passphrase)
+#
+# ANTES DE SUBIR QUALQUER COISA o workflow confere o CI de cada servico alvo
+# (step "Confere o CI dos servicos alvo"). Sem isso o deploy mentia: quando o CI
+# quebra, o job que publica a imagem nao roda, a tag :latest continua apontando
+# para o commit anterior e o 'compose pull' re-subia a versao velha com o
+# workflow verde — parecia que a correcao tinha ido para producao.
 
 on:
   workflow_dispatch:
@@ -32,6 +38,128 @@ jobs:
         run: |
           if [ -z "$VPS_HOST" ]; then
             echo "::error::Secrets da VPS nao configurados. Crie VPS_HOST, VPS_USER e VPS_SSH_KEY em Settings > Secrets para ativar o deploy."
+            exit 1
+          fi
+
+      # Roda antes do checkout: se o CI de algum servico nao passou, o job morre
+      # aqui e nada — nem o compose — chega perto da VPS.
+      - name: Confere o CI dos servicos alvo
+        shell: bash
+        env:
+          SERVICO: ${{ inputs.servico }}
+          OWNER: ${{ github.repository_owner }}
+          # OPCIONAL. Sem ele a consulta e anonima: 60 req/h por IP do runner, que
+          # e compartilhado entre projetos. O guard gasta 2 req por servico, mas se
+          # o limite estourar por causa de vizinho ele BLOQUEIA o deploy (falha
+          # fechada). Se isso acontecer, crie o secret GH_API_TOKEN com um PAT de
+          # escopo public_repo e o limite sobe para 5000/h.
+          # O GITHUB_TOKEN padrao NAO serve: ele so tem escopo neste repo.
+          GH_API_TOKEN: ${{ secrets.GH_API_TOKEN }}
+        run: |
+          # Sem 'set -e' de proposito: quando o alvo e 'todos', queremos listar
+          # TODOS os servicos reprovados de uma vez, e nao morrer no primeiro.
+          set -uo pipefail
+
+          # Servico do compose -> repo dono no GitHub. Conferido pelo IMAGE_NAME
+          # do ci.yml de cada repo. 'bff' e o TrishaBff (era 'bfff'); existe um
+          # rafaeldossanto/BFF de outro projeto, entao o nome aqui importa.
+          declare -A REPOS=(
+            [cadastro]=Cadastro
+            [app]=APP
+            [bff]=TrishaBff
+            [loc]=loc
+            [midia]=midia
+          )
+          # Imagens de terceiro: nao tem CI nosso para conferir.
+          declare -A EXTERNAS=(
+            [zeebe]=camunda/zeebe:8.5.6
+            [caddy]=caddy:2-alpine
+          )
+
+          REGISTRO="$RUNNER_TEMP/deploy-shas.txt"
+          : > "$REGISTRO"
+
+          if [ "$SERVICO" = "todos" ]; then
+            ALVOS="cadastro app loc midia bff"
+          else
+            ALVOS="$SERVICO"
+          fi
+
+          api() {
+            if [ -n "${GH_API_TOKEN:-}" ]; then
+              curl -sS -m 20 -H "Accept: application/vnd.github+json" \
+                   -H "Authorization: Bearer $GH_API_TOKEN" "$1"
+            else
+              curl -sS -m 20 -H "Accept: application/vnd.github+json" "$1"
+            fi
+          }
+
+          falhou=0
+          for svc in $ALVOS; do
+            imagem_externa="${EXTERNAS[$svc]:-}"
+            if [ -n "$imagem_externa" ]; then
+              echo "-- $svc: imagem de terceiro ($imagem_externa), sem CI para conferir."
+              echo "$svc|-|$imagem_externa" >> "$REGISTRO"
+              continue
+            fi
+
+            repo="${REPOS[$svc]:-}"
+            if [ -z "$repo" ]; then
+              echo "::error::Servico '$svc' nao esta no mapa de repos deste workflow."
+              falhou=1
+              continue
+            fi
+
+            base="https://api.github.com/repos/$OWNER/$repo"
+
+            head_json=$(api "$base/commits/master") || head_json=""
+            head_sha=$(jq -r '.sha // empty' <<<"$head_json" 2>/dev/null) || head_sha=""
+            if [ -z "$head_sha" ]; then
+              motivo=$(jq -r '.message // "sem resposta da API"' <<<"$head_json" 2>/dev/null) || motivo="sem resposta da API"
+              echo "::error::Nao foi possivel confirmar o CI de $repo: falha ao ler o HEAD da master ($motivo). Na duvida o deploy e bloqueado."
+              falhou=1
+              continue
+            fi
+            curto="${head_sha:0:7}"
+
+            # event=push porque so o run de push publica imagem: o job docker-image
+            # do ci.yml tem 'if: github.event_name == push'. Um run de
+            # workflow_dispatch pode estar verde sem ter publicado nada.
+            runs_json=$(api "$base/actions/workflows/ci.yml/runs?branch=master&event=push&per_page=1") || runs_json=""
+            run=$(jq -c '.workflow_runs[0] // empty' <<<"$runs_json" 2>/dev/null) || run=""
+            if [ -z "$run" ]; then
+              echo "::error::CI de $repo: nenhum run do ci.yml encontrado na master (commit $curto). A imagem :latest nao pode ser confirmada — deploy bloqueado."
+              falhou=1
+              continue
+            fi
+
+            run_sha=$(jq -r '.head_sha // empty' <<<"$run")
+            status=$(jq -r '.status // empty' <<<"$run")
+            conclusion=$(jq -r '.conclusion // ""' <<<"$run")
+            url=$(jq -r '.html_url // empty' <<<"$run")
+
+            if [ "$run_sha" != "$head_sha" ]; then
+              echo "::error::CI de $repo ainda nao rodou para o commit $curto (ultimo run e do ${run_sha:0:7}). A imagem :latest ainda nao e a da master — espere o CI terminar."
+              falhou=1
+              continue
+            fi
+            if [ "$status" != "completed" ]; then
+              echo "::error::CI de $repo ainda esta rodando no commit $curto (status: $status). Espere terminar: $url"
+              falhou=1
+              continue
+            fi
+            if [ "$conclusion" != "success" ]; then
+              echo "::error::CI de $repo QUEBROU no commit $curto (conclusao: $conclusion). A imagem :latest ainda e a do commit ANTERIOR — deployar agora nao subiria esta versao. Corrija o CI antes: $url"
+              falhou=1
+              continue
+            fi
+
+            echo "OK -- $svc ($repo) commit $curto"
+            echo "$svc|$repo|$head_sha" >> "$REGISTRO"
+          done
+
+          if [ "$falhou" -ne 0 ]; then
+            echo "::error::Deploy bloqueado pelo guard de CI. Nada foi enviado para a VPS."
             exit 1
           fi
 
@@ -69,3 +197,35 @@ jobs:
               docker compose -f docker-compose.prod.yml up -d "$SERVICO"
             fi
             docker image prune -f
+            # Fica no log do run: o que a VPS de fato tem, com os digests.
+            # '|| true' para um erro aqui nao marcar como falho um deploy que deu certo.
+            docker compose -f docker-compose.prod.yml images || true
+
+      # O guard acima garante que a :latest puxada e a do HEAD da master, entao o
+      # sha que ele resolveu e o que subiu. Este resumo e o unico registro de qual
+      # versao esta em producao — o compose so diz ':latest'.
+      - name: Resumo do deploy
+        if: success()
+        shell: bash
+        env:
+          SERVICO: ${{ inputs.servico }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -uo pipefail
+          REGISTRO="$RUNNER_TEMP/deploy-shas.txt"
+          {
+            echo "## Deploy concluido — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo
+            echo "Alvo do workflow: \`$SERVICO\`"
+            echo
+            echo "| Servico | Commit | Repo |"
+            echo "|---|---|---|"
+            while IFS='|' read -r svc repo sha; do
+              [ -z "${svc:-}" ] && continue
+              if [ "$repo" = "-" ]; then
+                echo "| $svc | — | \`$sha\` (imagem de terceiro) |"
+              else
+                echo "| $svc | [\`${sha:0:7}\`](https://github.com/$OWNER/$repo/commit/$sha) | $repo |"
+              fi
+            done < "$REGISTRO"
+          } >> "$GITHUB_STEP_SUMMARY"
